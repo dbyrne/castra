@@ -1,0 +1,13 @@
+name: PLACEHOLDER
+parent: null
+parent_checkpoint: null
+
+axes: {}
+
+env: {}
+
+shards: {}
+
+artifacts:
+  checkpoints_keep: 10
+  retain_finalized: true

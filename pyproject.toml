@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "castra"
+version = "0.1.0"
+description = "Experiment management and worker fleet for AI agent research"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+castra = "castra.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["castra*"]
+
+[tool.setuptools.package-data]
+"castra" = ["templates/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
