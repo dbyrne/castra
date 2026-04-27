@@ -63,6 +63,17 @@ def info(name: str) -> None:
     commands.cmd_exp_info(name)
 
 
+@exp.command()
+@click.option("--coordinator", "coord_url", default=None,
+              help="Coordinator URL to query for live shard/worker state.")
+@click.option("--refresh-hz", default=1.0, show_default=True,
+              help="Refresh frequency in Hz.")
+def dashboard(coord_url: str | None, refresh_hz: float) -> None:
+    """Live TUI showing experiments + coordinator + workers (Ctrl+C to exit)."""
+    from castra.dashboard import run as run_dashboard
+    run_dashboard(coord_url, refresh_hz=refresh_hz)
+
+
 @main.group()
 def coordinator() -> None:
     """Coordinator process — fastapi sidecar owning shard state."""
@@ -117,6 +128,48 @@ def worker(coord_url: str, experiment: str | None, imports: tuple[str, ...],
         max_idle_iterations=max_idle,
     )
     click.echo(f"worker exited; processed {n} shard(s).")
+
+
+@main.group()
+def workers() -> None:
+    """Worker fleet operations (spawn / list / cost)."""
+
+
+@workers.command(name="spawn-local")
+@click.option("--coordinator", "coord_url", required=True,
+              help="Coordinator URL, e.g. http://localhost:8765.")
+@click.option("--count", type=int, default=None,
+              help="Number of workers to spawn (default: cpu_count - 1).")
+@click.option("--experiment", default=None,
+              help="Restrict workers to shards from this experiment.")
+@click.option("--import", "imports", multiple=True,
+              help="Module to import in each worker. Repeatable.")
+@click.option("--backend", default="local-subprocess", show_default=True,
+              help="Backend label recorded with the worker registration.")
+@click.option("--lease-seconds", default=240, show_default=True)
+@click.option("--max-idle", type=int, default=None,
+              help="Each worker stops after N consecutive empty polls.")
+def workers_spawn_local(coord_url: str, count: int | None,
+                        experiment: str | None, imports: tuple[str, ...],
+                        backend: str, lease_seconds: int,
+                        max_idle: int | None) -> None:
+    """Spawn N local-subprocess workers and supervise them as a group."""
+    from castra.fleet import auto_count, spawn_local_workers, supervise
+    n = count if count is not None else auto_count()
+    click.echo(f"spawning {n} local worker(s) -> {coord_url}")
+    procs = spawn_local_workers(
+        coord_url, n,
+        experiment=experiment,
+        imports=list(imports),
+        backend=backend,
+        lease_seconds=lease_seconds,
+        max_idle=max_idle,
+    )
+    pids = ", ".join(str(p.pid) for p in procs)
+    click.echo(f"  pids: {pids}")
+    click.echo("  (Ctrl+C to stop)")
+    code = supervise(procs)
+    click.echo(f"all workers exited (max code {code})")
 
 
 if __name__ == "__main__":
