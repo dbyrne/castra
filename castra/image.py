@@ -51,6 +51,10 @@ class ContainerInfo:
 def _run(argv: list[str], *, check: bool = True) -> str:
     """Run a docker subcommand and return stdout (stripped of trailing newline).
 
+    Forces utf-8 + errors='replace' explicitly so Windows hosts (default
+    cp1252 locale) don't crash on docker's progress output, which can
+    contain bytes outside cp1252's range.
+
     Raises DockerError on non-zero exit or if docker isn't installed.
     """
     if shutil.which(argv[0]) is None:
@@ -60,6 +64,8 @@ def _run(argv: list[str], *, check: bool = True) -> str:
             argv,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=check,
         )
     except subprocess.CalledProcessError as e:
