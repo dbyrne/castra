@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import click
 
 from castra import commands
@@ -168,6 +170,107 @@ def workers_spawn_local(coord_url: str, count: int | None,
     pids = ", ".join(str(p.pid) for p in procs)
     click.echo(f"  pids: {pids}")
     click.echo("  (Ctrl+C to stop)")
+    code = supervise(procs)
+    click.echo(f"all workers exited (max code {code})")
+
+
+@workers.command(name="plan")
+@click.option("--capacity", "capacity_path", required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Capacity YAML file.")
+@click.option("--max-workers", type=int, required=True,
+              help="Total worker target.")
+def workers_plan(capacity_path: "Path", max_workers: int) -> None:
+    """Print the fleet allocation for `max-workers` against the capacity config."""
+    from castra.capacity import CapacityConfig, make_plan
+    cap = CapacityConfig.from_yaml(capacity_path)
+    plan = make_plan(cap, max_workers)
+    click.echo(f"plan: {plan.total_workers} worker(s)")
+    for u in plan.units:
+        host = u.host or "(local)"
+        click.echo(f"  {u.backend:<20} {host:<28} workers={u.workers}")
+    if plan.total_workers < max_workers:
+        click.echo(click.style(
+            f"warning: capacity short by {max_workers - plan.total_workers} worker(s)",
+            fg="yellow",
+        ))
+
+
+@workers.command(name="launch")
+@click.option("--coordinator", "coord_url", required=True,
+              help="Coordinator URL, e.g. http://localhost:8765.")
+@click.option("--capacity", "capacity_path", required=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Capacity YAML file.")
+@click.option("--max-workers", type=int, required=True,
+              help="Total worker target.")
+@click.option("--experiment", default=None,
+              help="Restrict workers to shards from this experiment.")
+@click.option("--import", "imports", multiple=True,
+              help="Module each worker should import. Repeatable.")
+@click.option("--lease-seconds", default=240, show_default=True)
+@click.option("--max-idle", type=int, default=None)
+@click.option("--dry-run", is_flag=True,
+              help="Print the plan without spawning anything.")
+def workers_launch(coord_url: str, capacity_path: "Path", max_workers: int,
+                   experiment: str | None, imports: tuple[str, ...],
+                   lease_seconds: int, max_idle: int | None,
+                   dry_run: bool) -> None:
+    """Launch a mixed fleet (local + SSH) against the coordinator."""
+    from castra.capacity import CapacityConfig, make_plan
+    from castra.fleet import (
+        spawn_local_workers, spawn_ssh_workers, supervise,
+    )
+    cap = CapacityConfig.from_yaml(capacity_path)
+    plan = make_plan(cap, max_workers)
+
+    click.echo(f"plan: {plan.total_workers} worker(s) -> {coord_url}")
+    for u in plan.units:
+        host = u.host or "(local)"
+        click.echo(f"  {u.backend:<20} {host:<28} workers={u.workers}")
+    if plan.total_workers < max_workers:
+        click.echo(click.style(
+            f"warning: capacity short by {max_workers - plan.total_workers} worker(s)",
+            fg="yellow",
+        ))
+    if dry_run:
+        return
+
+    # Build host index for SSH lookup.
+    host_by_name = {h.host: h for h in cap.ssh.hosts}
+
+    procs = []
+    next_idx = 0
+    for u in plan.units:
+        if u.backend == "local-subprocess":
+            new = spawn_local_workers(
+                coord_url, u.workers,
+                experiment=experiment,
+                imports=list(imports),
+                lease_seconds=lease_seconds,
+                max_idle=max_idle,
+            )
+        elif u.backend == "ssh":
+            host_cfg = host_by_name[u.host]  # type: ignore[index]
+            new = spawn_ssh_workers(
+                coord_url, host_cfg, u.workers,
+                experiment=experiment,
+                imports=list(imports),
+                lease_seconds=lease_seconds,
+                max_idle=max_idle,
+                starting_index=next_idx,
+            )
+        else:
+            click.echo(click.style(
+                f"  skipping unsupported backend: {u.backend}", fg="yellow"))
+            continue
+        next_idx += u.workers
+        for p in new:
+            click.echo(f"  spawned {u.backend} pid={p.pid} "
+                       f"host={u.host or 'local'}")
+        procs.extend(new)
+
+    click.echo(f"  total spawned: {len(procs)} (Ctrl+C to stop)")
     code = supervise(procs)
     click.echo(f"all workers exited (max code {code})")
 

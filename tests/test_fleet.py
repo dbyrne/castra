@@ -9,10 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from castra.capacity import SSHHost
 from castra.fleet import (
     WorkerProcess,
     auto_count,
     spawn_local_workers,
+    spawn_ssh_workers,
+    ssh_command,
     supervise,
     worker_command,
 )
@@ -136,3 +139,80 @@ def test_worker_process_pid_and_alive_properties() -> None:
     m.poll = MagicMock(return_value=0)
     m.returncode = 0
     assert w.alive is False
+
+
+# ---- SSH backend ----
+
+
+def test_worker_command_uses_provided_python() -> None:
+    cmd = worker_command("http://x", python="/opt/python/bin/python")
+    assert cmd[0] == "/opt/python/bin/python"
+
+
+def test_ssh_command_includes_host_user() -> None:
+    host = SSHHost(host="myhost", user="alice", ssh_key="~/.ssh/id_rsa")
+    cmd = ssh_command(host, ["python3", "-m", "castra.cli", "worker",
+                              "--coordinator", "http://x"])
+    assert cmd[0] == "ssh"
+    assert "alice@myhost" in cmd
+    # The remote command is shlex-joined as the last argument.
+    assert "castra.cli" in cmd[-1]
+
+
+def test_ssh_command_includes_ssh_key_when_provided() -> None:
+    host = SSHHost(host="h", user="u", ssh_key="/keys/id")
+    cmd = ssh_command(host, ["echo", "hi"])
+    assert "-i" in cmd
+    i = cmd.index("-i")
+    # The path may be expanded but the leaf 'id' should remain.
+    assert "id" in cmd[i + 1]
+
+
+def test_ssh_command_omits_key_when_none() -> None:
+    host = SSHHost(host="h", user="u", ssh_key=None)
+    cmd = ssh_command(host, ["echo", "hi"])
+    assert "-i" not in cmd
+
+
+def test_ssh_command_uses_batch_mode() -> None:
+    """BatchMode=yes prevents interactive prompts (passwords, host-key check)."""
+    host = SSHHost(host="h", user="u")
+    cmd = ssh_command(host, ["echo", "hi"])
+    # Concatenated form: should appear verbatim somewhere as adjacent items.
+    options = " ".join(cmd)
+    assert "BatchMode=yes" in options
+
+
+def test_ssh_command_quotes_remote_argv() -> None:
+    """A remote arg containing spaces should be properly quoted."""
+    host = SSHHost(host="h", user="u")
+    cmd = ssh_command(host, ["python", "-c", "print('hello world')"])
+    # Last element is the joined remote command; should retain quoting.
+    assert "'hello world'" in cmd[-1] or '"hello world"' in cmd[-1] or "'\\''" in cmd[-1]
+
+
+def test_spawn_ssh_workers_uses_remote_python() -> None:
+    """spawn_ssh_workers should embed the host's python_path in the remote cmd."""
+    host = SSHHost(host="h", user="u", workers=2,
+                   python_path="/opt/proj/.venv/bin/python")
+    with patch("castra.fleet.subprocess.Popen") as popen:
+        popen.return_value = MagicMock(pid=999, poll=lambda: None)
+        spawn_ssh_workers("http://x", host, count=2,
+                          imports=["foedus.shards"])
+        assert popen.call_count == 2
+        argv = popen.call_args_list[0][0][0]
+        assert argv[0] == "ssh"
+        # The shlex-joined remote command (last element) must include remote python.
+        assert "/opt/proj/.venv/bin/python" in argv[-1]
+        assert "foedus.shards" in argv[-1]
+
+
+def test_spawn_ssh_workers_records_backend_label() -> None:
+    """The worker registers as backend='ssh:<host>' so cost rollups can attribute."""
+    host = SSHHost(host="laptop-basement", user="u", workers=1)
+    with patch("castra.fleet.subprocess.Popen") as popen:
+        popen.return_value = MagicMock(pid=1, poll=lambda: None)
+        spawn_ssh_workers("http://x", host, count=1)
+        argv = popen.call_args_list[0][0][0]
+        # remote command (last element) contains --backend ssh:laptop-basement
+        assert "ssh:laptop-basement" in argv[-1]
