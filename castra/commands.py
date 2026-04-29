@@ -230,3 +230,250 @@ def _experiment_status(w: worktree.WorktreeInfo,
     if spec.concluded_gen is not None:
         return "final"
     return "active"
+
+
+# --- Phase 8: finalize / ship / archive / promote / compare -----------------
+
+
+def _resolve_worktree_or_die(name: str, project_root: Path) -> "worktree.WorktreeInfo":
+    """Find the worktree for `name`, raise click.ClickException if missing."""
+    w = worktree.info(name, project_root=project_root)
+    if w is None:
+        raise click.ClickException(f"no experiment named {name!r}")
+    return w
+
+
+def _load_spec_or_die(name: str, w: "worktree.WorktreeInfo") -> ExperimentSpec:
+    config_path = w.path / "experiments" / name / "config.yaml"
+    if not config_path.exists():
+        raise click.ClickException(
+            f"experiment {name!r} has no config.yaml at {config_path}; "
+            "is the worktree corrupted?"
+        )
+    return ExperimentSpec.from_yaml(config_path)
+
+
+def cmd_exp_finalize(name: str, gen: int, reason: str, *,
+                     force: bool = False) -> None:
+    """Mark an experiment as canonically concluded at generation `gen`.
+
+    Writes `concluded_gen`, `concluded_reason`, `concluded_at` into the
+    spec. By default refuses to overwrite an existing finalization;
+    pass --force to override.
+    """
+    project_root = paths.project_root()
+    w = _resolve_worktree_or_die(name, project_root)
+    if not w.path.exists():
+        raise click.ClickException(
+            f"experiment {name!r} is archived; finalize must run before "
+            "archive (or restore the worktree first)."
+        )
+    spec = _load_spec_or_die(name, w)
+    if spec.concluded_gen is not None and not force:
+        raise click.ClickException(
+            f"experiment {name!r} is already finalized "
+            f"(gen={spec.concluded_gen}, reason={spec.concluded_reason!r}). "
+            "Pass --force to overwrite."
+        )
+    spec.concluded_gen = gen
+    spec.concluded_reason = reason
+    spec.concluded_at = _now_iso()
+    config_path = w.path / "experiments" / name / "config.yaml"
+    spec.to_yaml(config_path)
+    click.echo(click.style(
+        f"✓ experiment {name!r} finalized at gen={gen}", fg="green"))
+    click.echo(f"  reason:       {reason}")
+    click.echo(f"  concluded_at: {spec.concluded_at}")
+    click.echo(f"  config:       {config_path}")
+
+
+def _is_under(child: Path, parent: Path) -> bool:
+    """True if `child` is `parent` or contained within it."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def cmd_exp_ship(name: str, *, force: bool = False) -> None:
+    """Copy a finalized experiment's `config.yaml` and `benchmarks/` from
+    the worktree back to the main repo's `experiments/<name>/`.
+
+    Requires finalize first (the spec must record concluded_gen). Code
+    merging happens separately via git merge — `ship` only handles the
+    artifact sync.
+    """
+    project_root = paths.project_root()
+    w = _resolve_worktree_or_die(name, project_root)
+    if not w.path.exists():
+        raise click.ClickException(
+            f"worktree for {name!r} is archived; cannot ship from it."
+        )
+    spec = _load_spec_or_die(name, w)
+    if spec.concluded_gen is None and not force:
+        raise click.ClickException(
+            f"experiment {name!r} not finalized yet. Run "
+            f"`castra exp finalize {name} --gen N --reason ...` first, or "
+            "pass --force to ship anyway."
+        )
+
+    src_dir = w.path / "experiments" / name
+    dst_dir = project_root / "experiments" / name
+    dst_dir.mkdir(parents=True, exist_ok=True)
+
+    src_config = src_dir / "config.yaml"
+    dst_config = dst_dir / "config.yaml"
+    shutil.copy2(src_config, dst_config)
+    click.echo(f"  shipped:  {dst_config}")
+
+    src_benchmarks = src_dir / "benchmarks"
+    dst_benchmarks = dst_dir / "benchmarks"
+    if src_benchmarks.exists():
+        if dst_benchmarks.exists():
+            shutil.rmtree(dst_benchmarks)
+        shutil.copytree(src_benchmarks, dst_benchmarks)
+        click.echo(f"  shipped:  {dst_benchmarks}/")
+    else:
+        click.echo("  (no benchmarks/ to ship)")
+
+    click.echo(click.style(
+        f"\n✓ experiment {name!r} shipped to {project_root}", fg="green"))
+
+
+def cmd_exp_archive(name: str, *, force: bool = False) -> None:
+    """Remove the experiment's worktree and venv. The branch and any
+    shipped artifacts are retained.
+
+    By default requires the experiment to have been finalized (and ideally
+    shipped). Pass --force to archive without those guards.
+    """
+    project_root = paths.project_root()
+    w = worktree.info(name, project_root=project_root)
+    if w is None:
+        # No worktree present. If the branch still exists this is already
+        # archived (idempotent no-op). If the branch is also missing the
+        # experiment never existed.
+        if branch_exists(paths.branch_for(name), cwd=project_root):
+            click.echo(f"experiment {name!r} already archived.")
+            return
+        raise click.ClickException(f"no experiment named {name!r}")
+    if not w.path.exists():
+        click.echo(f"experiment {name!r} already archived.")
+        return
+    spec = _load_spec_or_die(name, w)
+    if spec.concluded_gen is None and not force:
+        raise click.ClickException(
+            f"experiment {name!r} not finalized; archiving would lose "
+            "in-progress state. Pass --force to archive anyway, or finalize "
+            "first."
+        )
+    # Always pass force=True at the git layer: archive's contract is to
+    # dispose the working-state directory, leaving only the branch and
+    # any shipped artifacts. Uncommitted scaffold (config.yaml etc.) is
+    # expected to be present and is intentionally not preserved here.
+    worktree.remove(name, force=True, project_root=project_root)
+    click.echo(click.style(
+        f"✓ worktree for {name!r} removed (branch retained)", fg="green"))
+
+
+def cmd_exp_promote(name: str, gen: int | None = None) -> None:
+    """Copy a finalized checkpoint to `<project>/frontier/` and append to
+    `FRONTIER.md`.
+
+    `gen` defaults to `spec.concluded_gen`. The checkpoint is expected at
+    `<worktree>/experiments/<name>/checkpoints/gen-<gen>.pt`; if missing,
+    falls back to `latest.pt`. Promoted file lands at
+    `<project>/frontier/<name>-gen<N>.pt`.
+    """
+    project_root = paths.project_root()
+    w = _resolve_worktree_or_die(name, project_root)
+    if not w.path.exists():
+        raise click.ClickException(
+            f"experiment {name!r} is archived; cannot promote."
+        )
+    spec = _load_spec_or_die(name, w)
+    if spec.concluded_gen is None:
+        raise click.ClickException(
+            f"experiment {name!r} not finalized; finalize before promoting."
+        )
+    use_gen = spec.concluded_gen if gen is None else gen
+
+    src_named = w.path / "experiments" / name / "checkpoints" / f"gen-{use_gen}.pt"
+    src_latest = w.path / "experiments" / name / "checkpoints" / "latest.pt"
+    if src_named.exists():
+        src = src_named
+    elif src_latest.exists():
+        src = src_latest
+        click.echo(f"  (gen-{use_gen}.pt missing; falling back to latest.pt)")
+    else:
+        raise click.ClickException(
+            f"no checkpoint at {src_named} or {src_latest}; "
+            "promote requires a saved checkpoint."
+        )
+
+    frontier_dir = project_root / "frontier"
+    frontier_dir.mkdir(parents=True, exist_ok=True)
+    dst = frontier_dir / f"{name}-gen{use_gen}.pt"
+    shutil.copy2(src, dst)
+    click.echo(f"  copied:    {src} -> {dst}")
+
+    frontier_md = project_root / "FRONTIER.md"
+    line = (f"- {_now_iso()}: promoted **{name}** gen={use_gen} "
+            f"(reason: {spec.concluded_reason}) -> `{dst.relative_to(project_root)}`")
+    if frontier_md.exists():
+        existing = frontier_md.read_text()
+        if not existing.endswith("\n"):
+            existing += "\n"
+        frontier_md.write_text(existing + line + "\n")
+    else:
+        frontier_md.write_text(
+            "# Frontier\n\nPromoted checkpoints in chronological order.\n\n"
+            + line + "\n"
+        )
+    click.echo(f"  appended:  {frontier_md}")
+    click.echo(click.style(
+        f"\n✓ experiment {name!r} gen={use_gen} promoted", fg="green"))
+
+
+def cmd_exp_compare(names: list[str]) -> None:
+    """Print a side-by-side comparison of multiple experiments' specs and
+    concluded state. Light v1 — no statistical tests yet (rating-delta CIs
+    arrive when an OpenSkill-aware harness lands).
+    """
+    if len(names) < 2:
+        raise click.ClickException("`compare` needs at least two experiment names.")
+    project_root = paths.project_root()
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        w = worktree.info(name, project_root=project_root)
+        if w is None:
+            click.echo(f"⚠ no experiment named {name!r}; skipping.")
+            continue
+        config_path = w.path / "experiments" / name / "config.yaml"
+        spec: ExperimentSpec | None = None
+        if config_path.exists():
+            try:
+                spec = ExperimentSpec.from_yaml(config_path)
+            except Exception:
+                pass
+        rows.append({
+            "name": name,
+            "status": _experiment_status(w, project_root),
+            "concluded_gen": spec.concluded_gen if spec else None,
+            "concluded_reason": spec.concluded_reason if spec else None,
+            "axes": sorted(spec.axes.keys()) if spec else [],
+            "git_sha": (spec.git_sha[:8] if (spec and spec.git_sha) else "?"),
+        })
+
+    if not rows:
+        raise click.ClickException("no comparable experiments found.")
+
+    headers = ["name", "status", "concluded_gen", "concluded_reason", "axes", "git_sha"]
+    widths = {h: max(len(h), max(len(str(r.get(h, "") or "")) for r in rows))
+              for h in headers}
+    sep = "  ".join("-" * widths[h] for h in headers)
+    click.echo("  ".join(h.ljust(widths[h]) for h in headers))
+    click.echo(sep)
+    for r in rows:
+        click.echo("  ".join(str(r.get(h, "") or "").ljust(widths[h]) for h in headers))

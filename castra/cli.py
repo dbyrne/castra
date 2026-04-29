@@ -66,6 +66,53 @@ def info(name: str) -> None:
 
 
 @exp.command()
+@click.argument("name")
+@click.option("--gen", type=int, required=True,
+              help="Generation number to record as the canonical conclusion.")
+@click.option("--reason", required=True,
+              help="Free-text reason recorded with the finalization.")
+@click.option("--force", is_flag=True,
+              help="Overwrite existing finalization metadata.")
+def finalize(name: str, gen: int, reason: str, force: bool) -> None:
+    """Mark an experiment's canonical conclusion at generation `gen`."""
+    commands.cmd_exp_finalize(name, gen, reason, force=force)
+
+
+@exp.command()
+@click.argument("name")
+@click.option("--force", is_flag=True,
+              help="Ship even if not finalized (e.g. preliminary results).")
+def ship(name: str, force: bool) -> None:
+    """Sync config + benchmarks from the worktree back to main repo."""
+    commands.cmd_exp_ship(name, force=force)
+
+
+@exp.command()
+@click.argument("name")
+@click.option("--force", is_flag=True,
+              help="Archive without requiring finalization.")
+def archive(name: str, force: bool) -> None:
+    """Remove the worktree (branch retained)."""
+    commands.cmd_exp_archive(name, force=force)
+
+
+@exp.command()
+@click.argument("name")
+@click.option("--gen", type=int, default=None,
+              help="Generation to promote (defaults to spec.concluded_gen).")
+def promote(name: str, gen: int | None) -> None:
+    """Copy a finalized checkpoint to frontier/ and update FRONTIER.md."""
+    commands.cmd_exp_promote(name, gen)
+
+
+@exp.command()
+@click.argument("names", nargs=-1, required=True)
+def compare(names: tuple[str, ...]) -> None:
+    """Side-by-side comparison of two or more experiments."""
+    commands.cmd_exp_compare(list(names))
+
+
+@exp.command()
 @click.option("--coordinator", "coord_url", default=None,
               help="Coordinator URL to query for live shard/worker state.")
 @click.option("--refresh-hz", default=1.0, show_default=True,
