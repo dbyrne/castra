@@ -345,6 +345,83 @@ def test_compare_emits_table(project_repo: Path) -> None:
     assert "beta done" in out
 
 
+def _write_metrics(worktree_path: Path, name: str,
+                   metrics: dict, metadata: dict | None = None) -> None:
+    from castra.metrics import MetricsRecord
+    bench = worktree_path / "experiments" / name / "benchmarks"
+    bench.mkdir(parents=True, exist_ok=True)
+    rec = MetricsRecord(metrics=metrics, metadata=metadata or {})
+    rec.to_yaml(bench / "metrics.yaml")
+
+
+def test_compare_tabulates_metrics_with_delta(project_repo: Path) -> None:
+    """With exactly two experiments, compare shows a metrics section with
+    a Δ column."""
+    _run(["exp", "create", "exp-a"])
+    _run(["exp", "create", "exp-b"])
+    wt_a = project_repo.parent / "myproj-exp-a"
+    wt_b = project_repo.parent / "myproj-exp-b"
+    _write_metrics(wt_a, "exp-a",
+                   metrics={"delta": -0.9, "wins": 24},
+                   metadata={"search": "greedy"})
+    _write_metrics(wt_b, "exp-b",
+                   metrics={"delta": 3.71, "wins": 79},
+                   metadata={"search": "puct"})
+
+    code, out = _run(["exp", "compare", "exp-a", "exp-b"])
+    assert code == 0, out
+    assert "=== metrics ===" in out
+    assert "delta" in out
+    assert "wins" in out
+    # Δ column appears for two-experiment compare.
+    assert "Δ" in out
+    # Metadata section also rendered.
+    assert "=== metadata ===" in out
+    assert "search" in out
+    assert "puct" in out and "greedy" in out
+
+
+def test_compare_three_experiments_omits_delta_column(project_repo: Path) -> None:
+    """3+ experiments: no Δ column (delta only well-defined pairwise)."""
+    for n in ("exp-a", "exp-b", "exp-c"):
+        _run(["exp", "create", n])
+        wt = project_repo.parent / f"myproj-{n}"
+        _write_metrics(wt, n, metrics={"score": 1.0})
+
+    code, out = _run(["exp", "compare", "exp-a", "exp-b", "exp-c"])
+    assert code == 0, out
+    assert "=== metrics ===" in out
+    # Headers contain all three names but no Δ.
+    metrics_section = out.split("=== metrics ===")[1]
+    header_line = metrics_section.split("\n", 2)[1]
+    assert "Δ" not in header_line
+
+
+def test_compare_handles_missing_metrics_with_dash(project_repo: Path) -> None:
+    """An experiment without metrics.yaml shows '—' in the metrics rows."""
+    _run(["exp", "create", "exp-a"])
+    _run(["exp", "create", "exp-b"])
+    wt_a = project_repo.parent / "myproj-exp-a"
+    _write_metrics(wt_a, "exp-a", metrics={"score": 1.5})
+    # exp-b deliberately has no metrics file.
+
+    code, out = _run(["exp", "compare", "exp-a", "exp-b"])
+    assert code == 0, out
+    assert "=== metrics ===" in out
+    assert "—" in out  # dash for missing exp-b value
+
+
+def test_compare_omits_metrics_section_when_none_present(project_repo: Path) -> None:
+    """No metrics anywhere: compare prints only the spec table (existing
+    behavior preserved)."""
+    _run(["exp", "create", "exp-a"])
+    _run(["exp", "create", "exp-b"])
+    code, out = _run(["exp", "compare", "exp-a", "exp-b"])
+    assert code == 0, out
+    assert "=== metrics ===" not in out
+    assert "=== metadata ===" not in out
+
+
 def test_compare_requires_two_names(project_repo: Path) -> None:
     _run(["exp", "create", "exp-a"])
     code, out = _run(["exp", "compare", "exp-a"])
