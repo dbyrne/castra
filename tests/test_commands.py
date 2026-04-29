@@ -374,7 +374,7 @@ def test_compare_tabulates_metrics_with_delta(project_repo: Path) -> None:
     assert "delta" in out
     assert "wins" in out
     # Δ column appears for two-experiment compare.
-    assert "Δ" in out
+    assert " diff " in out  # diff column header (the Δ-equivalent)
     # Metadata section also rendered.
     assert "=== metadata ===" in out
     assert "search" in out
@@ -394,7 +394,9 @@ def test_compare_three_experiments_omits_delta_column(project_repo: Path) -> Non
     # Headers contain all three names but no Δ.
     metrics_section = out.split("=== metrics ===")[1]
     header_line = metrics_section.split("\n", 2)[1]
-    assert "Δ" not in header_line
+    # No diff / Δ column when 3+ experiments are compared.
+    cols = header_line.split()
+    assert "diff" not in cols
 
 
 def test_compare_handles_missing_metrics_with_dash(project_repo: Path) -> None:
@@ -408,7 +410,8 @@ def test_compare_handles_missing_metrics_with_dash(project_repo: Path) -> None:
     code, out = _run(["exp", "compare", "exp-a", "exp-b"])
     assert code == 0, out
     assert "=== metrics ===" in out
-    assert "—" in out  # dash for missing exp-b value
+    # Missing values show as "-".
+    assert " -  " in out or "  - " in out
 
 
 def test_compare_omits_metrics_section_when_none_present(project_repo: Path) -> None:

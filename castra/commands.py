@@ -462,20 +462,32 @@ def _resolve_experiment_dir(
 
 
 def _format_metric_value(v: float) -> str:
-    """Compact numeric formatting: integers as int, floats with up to 4 sig figs."""
-    if v == int(v):
+    """Compact numeric formatting: 4 significant figures, integer-shaped
+    values without a decimal point."""
+    if v == int(v) and abs(v) < 1e9:
         return f"{int(v)}"
-    if abs(v) >= 100:
-        return f"{v:.1f}"
-    if abs(v) >= 1:
-        return f"{v:.3f}"
-    return f"{v:.4f}"
+    return f"{v:.4g}"
 
 
 def _format_delta(d: float) -> str:
     if d == 0:
         return "="
-    return ("+" if d > 0 else "") + _format_metric_value(d)
+    formatted = _format_metric_value(abs(d))
+    return ("+" if d > 0 else "-") + formatted
+
+
+def _format_metadata_value(v: Any) -> str:
+    """Compact one-line rendering of metadata values. Multi-line values
+    (e.g. `notes:`) get newlines collapsed to ' | ' so they don't blow
+    out the side-by-side table."""
+    if v is None:
+        return "-"
+    s = str(v).rstrip()
+    if "\n" in s:
+        s = " | ".join(line.strip() for line in s.splitlines() if line.strip())
+    if len(s) > 80:
+        s = s[:77] + "..."
+    return s
 
 
 def cmd_exp_compare(names: list[str]) -> None:
@@ -483,8 +495,8 @@ def cmd_exp_compare(names: list[str]) -> None:
 
     Top section: spec metadata (status, concluded_gen / reason, git_sha).
     Bottom section: numeric metrics from `benchmarks/metrics.yaml` plus
-    free-form metadata, with a Δ column when exactly two experiments are
-    compared (last - first).
+    free-form metadata, with a `delta` column when exactly two experiments
+    are compared (last - first).
     """
     if len(names) < 2:
         raise click.ClickException("`compare` needs at least two experiment names.")
@@ -577,12 +589,13 @@ def cmd_exp_compare(names: list[str]) -> None:
     def _val_for(name: str, key: str, kind: str) -> str:
         m = metrics_per_name.get(name)
         if m is None:
-            return "—"
+            return "-"
         if kind == "metric":
             v = m.metrics.get(key)
-            return _format_metric_value(v) if v is not None else "—"
-        v = m.metadata.get(key)
-        return "—" if v is None else str(v)
+            return _format_metric_value(v) if v is not None else "-"
+        if key not in m.metadata:
+            return "-"
+        return _format_metadata_value(m.metadata[key])
 
     def _delta_for(key: str) -> str:
         if not show_delta:
@@ -591,18 +604,18 @@ def cmd_exp_compare(names: list[str]) -> None:
         m_first = metrics_per_name.get(first)
         m_last = metrics_per_name.get(last)
         if m_first is None or m_last is None:
-            return "—"
+            return "-"
         v_first = m_first.metrics.get(key)
         v_last = m_last.metrics.get(key)
         if v_first is None or v_last is None:
-            return "—"
+            return "-"
         return _format_delta(v_last - v_first)
 
     # Print metrics table.
     if metric_keys:
         click.echo()
         click.echo("=== metrics ===")
-        m_headers = ["metric"] + present_names + (["Δ"] if show_delta else [])
+        m_headers = ["metric"] + present_names + (["diff"] if show_delta else [])
         m_rows: list[list[str]] = []
         for k in metric_keys:
             row = [k] + [_val_for(n, k, "metric") for n in present_names]
