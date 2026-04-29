@@ -162,3 +162,204 @@ def test_repair_succeeds_after_create(project_repo: Path) -> None:
 def test_repair_unknown_fails(project_repo: Path) -> None:
     code, out = _run(["exp", "repair", "ghost", "--no-rebuild"])
     assert code != 0
+
+
+# --- Phase 8: finalize / ship / archive / promote / compare -----------------
+
+
+def test_finalize_writes_concluded_metadata(project_repo: Path) -> None:
+    code, _ = _run(["exp", "create", "exp-1"])
+    assert code == 0
+    code, out = _run([
+        "exp", "finalize", "exp-1",
+        "--gen", "42", "--reason", "converged at val 0.019",
+    ])
+    assert code == 0, out
+    config = project_repo.parent / "myproj-exp-1" / "experiments" / "exp-1" / "config.yaml"
+    spec = ExperimentSpec.from_yaml(config)
+    assert spec.concluded_gen == 42
+    assert spec.concluded_reason == "converged at val 0.019"
+    assert spec.concluded_at is not None
+
+
+def test_finalize_refuses_overwrite_without_force(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "finalize", "exp-1", "--gen", "10", "--reason", "first"])
+    code, out = _run([
+        "exp", "finalize", "exp-1", "--gen", "20", "--reason", "again"
+    ])
+    assert code != 0
+    assert "already finalized" in out
+
+
+def test_finalize_force_overwrites(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "finalize", "exp-1", "--gen", "10", "--reason", "first"])
+    code, _ = _run([
+        "exp", "finalize", "exp-1",
+        "--gen", "20", "--reason", "redo", "--force",
+    ])
+    assert code == 0
+    config = project_repo.parent / "myproj-exp-1" / "experiments" / "exp-1" / "config.yaml"
+    spec = ExperimentSpec.from_yaml(config)
+    assert spec.concluded_gen == 20
+    assert spec.concluded_reason == "redo"
+
+
+def test_finalize_unknown_experiment(project_repo: Path) -> None:
+    code, out = _run(["exp", "finalize", "ghost", "--gen", "1", "--reason", "x"])
+    assert code != 0
+    assert "no experiment named" in out
+
+
+def test_ship_copies_config_and_benchmarks(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    # Drop a fake benchmark file inside the worktree so ship has something to copy.
+    bench_dir = (project_repo.parent / "myproj-exp-1"
+                 / "experiments" / "exp-1" / "benchmarks")
+    bench_dir.mkdir(parents=True, exist_ok=True)
+    (bench_dir / "tournament.jsonl").write_text("{\"score\": 1.0}\n")
+    _run(["exp", "finalize", "exp-1", "--gen", "5", "--reason", "done"])
+    code, out = _run(["exp", "ship", "exp-1"])
+    assert code == 0, out
+    shipped_config = project_repo / "experiments" / "exp-1" / "config.yaml"
+    shipped_bench = project_repo / "experiments" / "exp-1" / "benchmarks" / "tournament.jsonl"
+    assert shipped_config.exists()
+    assert shipped_bench.exists()
+    spec = ExperimentSpec.from_yaml(shipped_config)
+    assert spec.concluded_gen == 5
+
+
+def test_ship_refuses_without_finalize(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    code, out = _run(["exp", "ship", "exp-1"])
+    assert code != 0
+    assert "not finalized" in out
+
+
+def test_ship_force_skips_finalize_check(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    code, _ = _run(["exp", "ship", "exp-1", "--force"])
+    assert code == 0
+
+
+def test_archive_removes_worktree(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "finalize", "exp-1", "--gen", "5", "--reason", "done"])
+    wt = project_repo.parent / "myproj-exp-1"
+    assert wt.exists()
+    code, out = _run(["exp", "archive", "exp-1"])
+    assert code == 0, out
+    assert not wt.exists()
+
+
+def test_archive_refuses_without_finalize(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    code, out = _run(["exp", "archive", "exp-1"])
+    assert code != 0
+    assert "not finalized" in out
+
+
+def test_archive_force_skips_check(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    wt = project_repo.parent / "myproj-exp-1"
+    assert wt.exists()
+    code, _ = _run(["exp", "archive", "exp-1", "--force"])
+    assert code == 0
+    assert not wt.exists()
+
+
+def test_archive_idempotent_on_already_archived(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "archive", "exp-1", "--force"])
+    code, out = _run(["exp", "archive", "exp-1"])
+    # already archived -> no-op success
+    assert code == 0
+    assert "already archived" in out
+
+
+def test_promote_copies_checkpoint_and_updates_frontier_md(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    ckpt = (project_repo.parent / "myproj-exp-1"
+            / "experiments" / "exp-1" / "checkpoints" / "gen-7.pt")
+    ckpt.write_bytes(b"fake-checkpoint-bytes")
+    _run(["exp", "finalize", "exp-1", "--gen", "7", "--reason", "best val"])
+    code, out = _run(["exp", "promote", "exp-1"])
+    assert code == 0, out
+    promoted = project_repo / "frontier" / "exp-1-gen7.pt"
+    assert promoted.exists()
+    assert promoted.read_bytes() == b"fake-checkpoint-bytes"
+    frontier_md = project_repo / "FRONTIER.md"
+    assert frontier_md.exists()
+    text = frontier_md.read_text()
+    assert "exp-1" in text
+    assert "gen=7" in text
+    assert "best val" in text
+
+
+def test_promote_falls_back_to_latest_pt(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    ckpt = (project_repo.parent / "myproj-exp-1"
+            / "experiments" / "exp-1" / "checkpoints" / "latest.pt")
+    ckpt.write_bytes(b"latest-bytes")
+    _run(["exp", "finalize", "exp-1", "--gen", "9", "--reason", "x"])
+    code, out = _run(["exp", "promote", "exp-1"])
+    assert code == 0, out
+    assert "falling back to latest.pt" in out
+    promoted = project_repo / "frontier" / "exp-1-gen9.pt"
+    assert promoted.exists()
+    assert promoted.read_bytes() == b"latest-bytes"
+
+
+def test_promote_explicit_gen_override(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    ck_dir = (project_repo.parent / "myproj-exp-1"
+              / "experiments" / "exp-1" / "checkpoints")
+    (ck_dir / "gen-3.pt").write_bytes(b"gen-3")
+    (ck_dir / "gen-7.pt").write_bytes(b"gen-7")
+    _run(["exp", "finalize", "exp-1", "--gen", "7", "--reason", "x"])
+    code, _ = _run(["exp", "promote", "exp-1", "--gen", "3"])
+    assert code == 0
+    assert (project_repo / "frontier" / "exp-1-gen3.pt").exists()
+
+
+def test_promote_refuses_without_finalize(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    ck_dir = (project_repo.parent / "myproj-exp-1"
+              / "experiments" / "exp-1" / "checkpoints")
+    (ck_dir / "latest.pt").write_bytes(b"x")
+    code, out = _run(["exp", "promote", "exp-1"])
+    assert code != 0
+    assert "not finalized" in out
+
+
+def test_compare_emits_table(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-a"])
+    _run(["exp", "create", "exp-b"])
+    _run(["exp", "finalize", "exp-a", "--gen", "5", "--reason", "alpha done"])
+    _run(["exp", "finalize", "exp-b", "--gen", "8", "--reason", "beta done"])
+    code, out = _run(["exp", "compare", "exp-a", "exp-b"])
+    assert code == 0, out
+    assert "exp-a" in out and "exp-b" in out
+    assert "alpha done" in out
+    assert "beta done" in out
+
+
+def test_compare_requires_two_names(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-a"])
+    code, out = _run(["exp", "compare", "exp-a"])
+    assert code != 0
+    assert "needs at least two" in out
+
+
+def test_info_reflects_finalization(project_repo: Path) -> None:
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "finalize", "exp-1", "--gen", "12", "--reason", "complete"])
+    code, out = _run(["exp", "info", "exp-1"])
+    assert code == 0
+    assert "concluded:" in out
+    assert "gen=12" in out
+    assert "complete" in out
+    code, out = _run(["exp", "list"])
+    # status column should show 'final'
+    assert "final" in out
