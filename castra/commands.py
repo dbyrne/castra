@@ -84,7 +84,7 @@ def cmd_exp_create(name: str, template: str, overrides: list[str]) -> None:
         click.echo("installing project in editable mode...")
         venv.install_editable_project(wt_path)
 
-    click.echo(click.style(f"\n✓ experiment {name!r} created", fg="green"))
+    click.echo(click.style(f"\n[OK] experiment {name!r} created", fg="green"))
 
 
 def cmd_exp_fork(name: str, source: str, checkpoint: str) -> None:
@@ -148,7 +148,7 @@ def cmd_exp_fork(name: str, source: str, checkpoint: str) -> None:
     if (wt_path / "pyproject.toml").exists():
         venv.install_editable_project(wt_path)
 
-    click.echo(click.style(f"\n✓ experiment {name!r} forked from {source!r}", fg="green"))
+    click.echo(click.style(f"\n[OK] experiment {name!r} forked from {source!r}", fg="green"))
 
 
 def cmd_exp_repair(name: str, *, rebuild_install: bool = True) -> None:
@@ -166,7 +166,7 @@ def cmd_exp_repair(name: str, *, rebuild_install: bool = True) -> None:
     if rebuild_install and (wt_info.path / "pyproject.toml").exists():
         click.echo("  reinstalling project in editable mode...")
         venv.install_editable_project(wt_info.path)
-    click.echo(click.style("✓ repair complete", fg="green"))
+    click.echo(click.style("[OK] repair complete", fg="green"))
 
 
 def cmd_exp_list() -> None:
@@ -281,7 +281,7 @@ def cmd_exp_finalize(name: str, gen: int, reason: str, *,
     config_path = w.path / "experiments" / name / "config.yaml"
     spec.to_yaml(config_path)
     click.echo(click.style(
-        f"✓ experiment {name!r} finalized at gen={gen}", fg="green"))
+        f"[OK] experiment {name!r} finalized at gen={gen}", fg="green"))
     click.echo(f"  reason:       {reason}")
     click.echo(f"  concluded_at: {spec.concluded_at}")
     click.echo(f"  config:       {config_path}")
@@ -338,7 +338,7 @@ def cmd_exp_ship(name: str, *, force: bool = False) -> None:
         click.echo("  (no benchmarks/ to ship)")
 
     click.echo(click.style(
-        f"\n✓ experiment {name!r} shipped to {project_root}", fg="green"))
+        f"\n[OK] experiment {name!r} shipped to {project_root}", fg="green"))
 
 
 def cmd_exp_archive(name: str, *, force: bool = False) -> None:
@@ -374,7 +374,7 @@ def cmd_exp_archive(name: str, *, force: bool = False) -> None:
     # expected to be present and is intentionally not preserved here.
     worktree.remove(name, force=True, project_root=project_root)
     click.echo(click.style(
-        f"✓ worktree for {name!r} removed (branch retained)", fg="green"))
+        f"[OK] worktree for {name!r} removed (branch retained)", fg="green"))
 
 
 def cmd_exp_promote(name: str, gen: int | None = None) -> None:
@@ -433,7 +433,7 @@ def cmd_exp_promote(name: str, gen: int | None = None) -> None:
         )
     click.echo(f"  appended:  {frontier_md}")
     click.echo(click.style(
-        f"\n✓ experiment {name!r} gen={use_gen} promoted", fg="green"))
+        f"\n[OK] experiment {name!r} gen={use_gen} promoted", fg="green"))
 
 
 def cmd_exp_compare(names: list[str]) -> None:
