@@ -17,6 +17,7 @@ import yaml
 
 from castra import paths, venv, worktree
 from castra.git import GitError, branch_exists, current_sha
+from castra.metrics import MetricsRecord, load_metrics
 from castra.spec import ExperimentSpec, apply_overrides
 
 
@@ -436,39 +437,112 @@ def cmd_exp_promote(name: str, gen: int | None = None) -> None:
         f"\n[OK] experiment {name!r} gen={use_gen} promoted", fg="green"))
 
 
+def _resolve_experiment_dir(
+    name: str, project_root: Path,
+) -> tuple[Path, str] | None:
+    """Return `(experiment_dir, status)` for `name`.
+
+    Prefers the live worktree's `experiments/<name>/` if present; falls back
+    to the shipped copy at `<project_root>/experiments/<name>/`. Returns
+    None if neither exists.
+
+    `status` is "active" / "finalized" (worktree present) or "shipped"
+    (worktree gone, archived data in main repo).
+    """
+    w = worktree.info(name, project_root=project_root)
+    if w is not None and w.path.exists():
+        exp_dir = w.path / "experiments" / name
+        if exp_dir.exists():
+            return exp_dir, _experiment_status(w, project_root)
+
+    shipped_dir = project_root / "experiments" / name
+    if shipped_dir.exists():
+        return shipped_dir, "shipped"
+    return None
+
+
+def _format_metric_value(v: float) -> str:
+    """Compact numeric formatting: 4 significant figures, integer-shaped
+    values without a decimal point."""
+    if v == int(v) and abs(v) < 1e9:
+        return f"{int(v)}"
+    return f"{v:.4g}"
+
+
+def _format_delta(d: float) -> str:
+    if d == 0:
+        return "="
+    formatted = _format_metric_value(abs(d))
+    return ("+" if d > 0 else "-") + formatted
+
+
+def _format_metadata_value(v: Any) -> str:
+    """Compact one-line rendering of metadata values. Multi-line values
+    (e.g. `notes:`) get newlines collapsed to ' | ' so they don't blow
+    out the side-by-side table."""
+    if v is None:
+        return "-"
+    s = str(v).rstrip()
+    if "\n" in s:
+        s = " | ".join(line.strip() for line in s.splitlines() if line.strip())
+    if len(s) > 80:
+        s = s[:77] + "..."
+    return s
+
+
 def cmd_exp_compare(names: list[str]) -> None:
-    """Print a side-by-side comparison of multiple experiments' specs and
-    concluded state. Light v1 — no statistical tests yet (rating-delta CIs
-    arrive when an OpenSkill-aware harness lands).
+    """Print a side-by-side comparison of multiple experiments.
+
+    Top section: spec metadata (status, concluded_gen / reason, git_sha).
+    Bottom section: numeric metrics from `benchmarks/metrics.yaml` plus
+    free-form metadata, with a `delta` column when exactly two experiments
+    are compared (last - first).
     """
     if len(names) < 2:
         raise click.ClickException("`compare` needs at least two experiment names.")
     project_root = paths.project_root()
+
     rows: list[dict[str, Any]] = []
+    metrics_per_name: dict[str, MetricsRecord | None] = {}
+
     for name in names:
-        w = worktree.info(name, project_root=project_root)
-        if w is None:
-            click.echo(f"⚠ no experiment named {name!r}; skipping.")
+        resolved = _resolve_experiment_dir(name, project_root)
+        if resolved is None:
+            click.echo(f"[WARN] no experiment named {name!r}; skipping.")
             continue
-        config_path = w.path / "experiments" / name / "config.yaml"
+        exp_dir, status = resolved
+
         spec: ExperimentSpec | None = None
+        config_path = exp_dir / "config.yaml"
         if config_path.exists():
             try:
                 spec = ExperimentSpec.from_yaml(config_path)
             except Exception:
                 pass
+
+        metrics: MetricsRecord | None = None
+        try:
+            metrics = load_metrics(exp_dir)
+        except Exception as e:
+            click.echo(f"[WARN] {name}: metrics.yaml unreadable: {e}")
+
         rows.append({
             "name": name,
-            "status": _experiment_status(w, project_root),
+            "status": status,
             "concluded_gen": spec.concluded_gen if spec else None,
             "concluded_reason": spec.concluded_reason if spec else None,
             "axes": sorted(spec.axes.keys()) if spec else [],
             "git_sha": (spec.git_sha[:8] if (spec and spec.git_sha) else "?"),
         })
+        metrics_per_name[name] = metrics
 
     if not rows:
         raise click.ClickException("no comparable experiments found.")
 
+    # --- Section 1: spec metadata ---
+
+    click.echo()
+    click.echo("=== experiments ===")
     headers = ["name", "status", "concluded_gen", "concluded_reason", "axes", "git_sha"]
     widths = {h: max(len(h), max(len(str(r.get(h, "") or "")) for r in rows))
               for h in headers}
@@ -477,3 +551,100 @@ def cmd_exp_compare(names: list[str]) -> None:
     click.echo(sep)
     for r in rows:
         click.echo("  ".join(str(r.get(h, "") or "").ljust(widths[h]) for h in headers))
+
+    # --- Section 2: metrics (only if at least one experiment has them) ---
+
+    have_metrics = any(m is not None for m in metrics_per_name.values())
+    if not have_metrics:
+        return
+
+    present_names = [r["name"] for r in rows]
+    show_delta = len(present_names) == 2
+
+    # Collect all numeric metric keys (preserve insertion order across experiments).
+    metric_keys: list[str] = []
+    seen: set[str] = set()
+    for n in present_names:
+        m = metrics_per_name.get(n)
+        if m is None:
+            continue
+        for k in m.metrics.keys():
+            if k not in seen:
+                seen.add(k)
+                metric_keys.append(k)
+
+    # Same for metadata.
+    meta_keys: list[str] = []
+    seen_meta: set[str] = set()
+    for n in present_names:
+        m = metrics_per_name.get(n)
+        if m is None:
+            continue
+        for k in m.metadata.keys():
+            if k not in seen_meta:
+                seen_meta.add(k)
+                meta_keys.append(k)
+
+    # Build value columns.
+    def _val_for(name: str, key: str, kind: str) -> str:
+        m = metrics_per_name.get(name)
+        if m is None:
+            return "-"
+        if kind == "metric":
+            v = m.metrics.get(key)
+            return _format_metric_value(v) if v is not None else "-"
+        if key not in m.metadata:
+            return "-"
+        return _format_metadata_value(m.metadata[key])
+
+    def _delta_for(key: str) -> str:
+        if not show_delta:
+            return ""
+        first, last = present_names[0], present_names[-1]
+        m_first = metrics_per_name.get(first)
+        m_last = metrics_per_name.get(last)
+        if m_first is None or m_last is None:
+            return "-"
+        v_first = m_first.metrics.get(key)
+        v_last = m_last.metrics.get(key)
+        if v_first is None or v_last is None:
+            return "-"
+        return _format_delta(v_last - v_first)
+
+    # Print metrics table.
+    if metric_keys:
+        click.echo()
+        click.echo("=== metrics ===")
+        m_headers = ["metric"] + present_names + (["diff"] if show_delta else [])
+        m_rows: list[list[str]] = []
+        for k in metric_keys:
+            row = [k] + [_val_for(n, k, "metric") for n in present_names]
+            if show_delta:
+                row.append(_delta_for(k))
+            m_rows.append(row)
+
+        m_widths = [
+            max(len(m_headers[i]), *(len(r[i]) for r in m_rows))
+            for i in range(len(m_headers))
+        ]
+        click.echo("  ".join(h.ljust(m_widths[i]) for i, h in enumerate(m_headers)))
+        click.echo("  ".join("-" * w for w in m_widths))
+        for r in m_rows:
+            click.echo("  ".join(c.ljust(m_widths[i]) for i, c in enumerate(r)))
+
+    if meta_keys:
+        click.echo()
+        click.echo("=== metadata ===")
+        md_headers = ["key"] + present_names
+        md_rows: list[list[str]] = []
+        for k in meta_keys:
+            md_rows.append([k] + [_val_for(n, k, "metadata") for n in present_names])
+
+        md_widths = [
+            max(len(md_headers[i]), *(len(r[i]) for r in md_rows))
+            for i in range(len(md_headers))
+        ]
+        click.echo("  ".join(h.ljust(md_widths[i]) for i, h in enumerate(md_headers)))
+        click.echo("  ".join("-" * w for w in md_widths))
+        for r in md_rows:
+            click.echo("  ".join(c.ljust(md_widths[i]) for i, c in enumerate(r)))
