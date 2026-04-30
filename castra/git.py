@@ -63,3 +63,24 @@ def branch_exists(name: str, cwd: Path | None = None) -> bool:
         return True
     except GitError:
         return False
+
+
+def list_branches_with_prefix(
+    prefix: str, cwd: Path | None = None,
+) -> list[str]:
+    """List local branch names starting with `prefix`.
+
+    Returns the full branch names (including the prefix), one per match,
+    sorted. Used to discover archived experiments — branches retained
+    after the worktree was removed.
+    """
+    try:
+        out = git(
+            "for-each-ref",
+            f"--format=%(refname:short)",
+            f"refs/heads/{prefix}",
+            cwd=cwd,
+        )
+    except GitError:
+        return []
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
