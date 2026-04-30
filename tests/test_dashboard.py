@@ -25,6 +25,56 @@ def test_fetch_snapshot_no_coordinator(project_repo: Path) -> None:
     assert snap.healthz is None
 
 
+def test_fetch_snapshot_includes_progress(project_repo: Path) -> None:
+    """When a project writes progress.json, the snapshot exposes stage +
+    message on the experiment row."""
+    from castra import worktree
+    from castra.progress import update_progress
+    wt = worktree.create("exp-1", project_root=project_repo)
+    update_progress(
+        wt / "experiments" / "exp-1",
+        stage="self-play",
+        message="42/100 shards",
+    )
+    snap = fetch_snapshot(coordinator_url=None, project_root=project_repo)
+    row = [e for e in snap.experiments if e["name"] == "exp-1"][0]
+    assert row["stage"] == "self-play"
+    assert row["progress_message"] == "42/100 shards"
+    assert row["stale"] is False
+
+
+def test_fetch_snapshot_marks_stale_progress(project_repo: Path) -> None:
+    """progress.json with an old timestamp is flagged stale."""
+    import datetime as _dt
+    import json
+    from castra import worktree
+    from castra.progress import PROGRESS_FILENAME, STALE_AFTER_SECONDS
+    wt = worktree.create("exp-1", project_root=project_repo)
+    exp_dir = wt / "experiments" / "exp-1"
+    exp_dir.mkdir(parents=True, exist_ok=True)
+    old_iso = (
+        _dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=STALE_AFTER_SECONDS + 60)
+    ).isoformat()
+    (exp_dir / PROGRESS_FILENAME).write_text(json.dumps({
+        "stage": "gate", "message": "stuck", "updated_at": old_iso,
+    }))
+    snap = fetch_snapshot(coordinator_url=None, project_root=project_repo)
+    row = [e for e in snap.experiments if e["name"] == "exp-1"][0]
+    assert row["stale"] is True
+
+
+def test_fetch_snapshot_no_progress_when_missing(project_repo: Path) -> None:
+    """Experiments without progress.json get empty stage/message strings."""
+    from castra import worktree
+    worktree.create("exp-1", project_root=project_repo)
+    snap = fetch_snapshot(coordinator_url=None, project_root=project_repo)
+    row = [e for e in snap.experiments if e["name"] == "exp-1"][0]
+    assert row["stage"] == ""
+    assert row["progress_message"] == ""
+    assert row["stale"] is False
+
+
 def test_fetch_snapshot_marks_status(project_repo: Path) -> None:
     """Experiments with a config.yaml are 'active'; concluded ones are 'final'."""
     from castra import worktree
