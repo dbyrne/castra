@@ -16,7 +16,9 @@ import click
 import yaml
 
 from castra import paths, venv, worktree
-from castra.git import GitError, branch_exists, current_sha
+from castra.git import (
+    GitError, branch_exists, current_sha, list_branches_with_prefix,
+)
 from castra.metrics import MetricsRecord, load_metrics
 from castra.spec import ExperimentSpec, apply_overrides
 
@@ -171,19 +173,73 @@ def cmd_exp_repair(name: str, *, rebuild_install: bool = True) -> None:
 
 
 def cmd_exp_list() -> None:
-    """List all known experiments."""
+    """List all known experiments — active worktrees, archived branches,
+    and shipped-only artifacts in `<project_root>/experiments/`.
+
+    Status legend:
+      active     worktree exists, no concluded_gen on the spec
+      final      worktree exists, concluded_gen set
+      archived   no worktree, branch retained (after `castra exp archive`)
+      shipped    no worktree, no branch, but artifacts in main repo
+                 (e.g. directly-written experiments or pre-castra runs)
+    """
     project_root = paths.project_root()
-    rows = worktree.list_all(project_root=project_root)
+
+    # 1. Worktrees (active + final).
+    worktree_rows = worktree.list_all(project_root=project_root)
+    by_name: dict[str, dict[str, Any]] = {}
+    for w in worktree_rows:
+        by_name[w.name] = {
+            "name": w.name,
+            "status": _experiment_status(w, project_root),
+            "branch": w.branch,
+            "path": str(w.path),
+        }
+
+    # 2. Branches matching `experiment/*` without a worktree -> archived.
+    for branch in list_branches_with_prefix("experiment/", cwd=project_root):
+        name = branch[len("experiment/"):]
+        if name in by_name:
+            continue  # already accounted for as worktree
+        by_name[name] = {
+            "name": name,
+            "status": "archived",
+            "branch": branch,
+            "path": "(archived)",
+        }
+
+    # 3. Shipped artifacts in main repo not yet known.
+    shipped_dir = project_root / "experiments"
+    if shipped_dir.exists():
+        for d in sorted(shipped_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            if d.name in by_name:
+                continue
+            if not (d / "config.yaml").exists():
+                continue
+            by_name[d.name] = {
+                "name": d.name,
+                "status": "shipped",
+                "branch": "(none)",
+                "path": str(d),
+            }
+
+    rows = [by_name[k] for k in sorted(by_name.keys())]
     if not rows:
         click.echo("no experiments yet. create one with `castra exp create <name>`.")
         return
 
-    name_w = max(len(w.name) for w in rows)
-    click.echo(f"  {'NAME':<{name_w}}  STATUS    BRANCH                 PATH")
-    click.echo(f"  {'-'*name_w}  --------  ---------------------  ----")
-    for w in rows:
-        status = _experiment_status(w, project_root)
-        click.echo(f"  {w.name:<{name_w}}  {status:<8}  {w.branch:<22} {w.path}")
+    name_w = max(len(r["name"]) for r in rows)
+    branch_w = max(len("BRANCH"),
+                   max(len(r["branch"]) for r in rows))
+    click.echo(f"  {'NAME':<{name_w}}  STATUS     {'BRANCH':<{branch_w}}  PATH")
+    click.echo(f"  {'-'*name_w}  ---------  {'-'*branch_w}  ----")
+    for r in rows:
+        click.echo(
+            f"  {r['name']:<{name_w}}  {r['status']:<9}  "
+            f"{r['branch']:<{branch_w}}  {r['path']}"
+        )
 
 
 def cmd_exp_info(name: str) -> None:

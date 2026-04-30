@@ -76,6 +76,77 @@ def test_list_empty(project_repo: Path) -> None:
     assert "no experiments yet" in out
 
 
+def test_list_shows_archived_experiments(project_repo: Path) -> None:
+    """After create + finalize + ship + archive, the experiment still
+    appears in `exp list` with status=archived."""
+    _run(["exp", "create", "exp-1"])
+    _run(["exp", "finalize", "exp-1", "--gen", "5", "--reason", "done"])
+    _run(["exp", "ship", "exp-1"])
+    _run(["exp", "archive", "exp-1"])
+    code, out = _run(["exp", "list"])
+    assert code == 0, out
+    assert "exp-1" in out
+    assert "archived" in out
+
+
+def test_list_shows_shipped_only_experiments(project_repo: Path) -> None:
+    """Experiments written directly to <project_root>/experiments/<name>/
+    (no worktree, no branch) show up with status=shipped."""
+    # Write a config.yaml directly into the project root's experiments dir.
+    shipped = project_repo / "experiments" / "direct-write"
+    shipped.mkdir(parents=True)
+    (shipped / "config.yaml").write_text(
+        "name: direct-write\n"
+        "parent: null\n"
+        "parent_checkpoint: null\n"
+        "axes: {}\n"
+        "env: {}\n"
+        "shards: {}\n"
+        "artifacts: {}\n"
+        "concluded_gen: null\n"
+        "concluded_reason: null\n"
+        "concluded_at: null\n"
+        "created_at: null\n"
+        "git_sha: null\n"
+    )
+
+    code, out = _run(["exp", "list"])
+    assert code == 0, out
+    assert "direct-write" in out
+    assert "shipped" in out
+
+
+def test_list_distinguishes_active_archived_shipped(project_repo: Path) -> None:
+    """All three statuses can coexist; verify each row gets the right one."""
+    # Active.
+    _run(["exp", "create", "active-one"])
+
+    # Archived (create -> finalize -> ship -> archive).
+    _run(["exp", "create", "archived-one"])
+    _run(["exp", "finalize", "archived-one", "--gen", "1", "--reason", "x"])
+    _run(["exp", "ship", "archived-one"])
+    _run(["exp", "archive", "archived-one"])
+
+    # Shipped-only (direct write).
+    shipped = project_repo / "experiments" / "shipped-only"
+    shipped.mkdir(parents=True)
+    (shipped / "config.yaml").write_text("name: shipped-only\n")
+
+    code, out = _run(["exp", "list"])
+    assert code == 0, out
+
+    lines = out.splitlines()
+    def _line_for(name):
+        for line in lines:
+            if name in line and "STATUS" not in line:
+                return line
+        raise AssertionError(f"{name!r} not found in:\n{out}")
+
+    assert "active" in _line_for("active-one")
+    assert "archived" in _line_for("archived-one")
+    assert "shipped" in _line_for("shipped-only")
+
+
 def test_info_shows_spec(project_repo: Path) -> None:
     _run(["exp", "create", "exp-1", "-o", "env.num_players=4"])
     code, out = _run(["exp", "info", "exp-1"])
