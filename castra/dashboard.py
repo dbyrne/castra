@@ -37,6 +37,7 @@ from rich.text import Text
 
 from castra import paths, worktree
 from castra.client import CoordinatorClient
+from castra.progress import read_progress
 from castra.spec import ExperimentSpec
 
 
@@ -52,7 +53,8 @@ class DashboardSnapshot:
 def _experiment_rows(project_root: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for w in worktree.list_all(project_root=project_root):
-        config_path = w.path / "experiments" / w.name / "config.yaml"
+        exp_dir = w.path / "experiments" / w.name
+        config_path = exp_dir / "config.yaml"
         status = "active"
         parent: str | None = None
         axes: list[str] = []
@@ -67,6 +69,13 @@ def _experiment_rows(project_root: Path) -> list[dict[str, Any]]:
                 status = "unreadable"
         elif not w.path.exists():
             status = "archived"
+        # Read live progress (may be None — not every project writes it).
+        progress = None
+        if w.path.exists():
+            try:
+                progress = read_progress(exp_dir)
+            except Exception:  # noqa: BLE001
+                progress = None
         out.append({
             "name": w.name,
             "status": status,
@@ -74,6 +83,9 @@ def _experiment_rows(project_root: Path) -> list[dict[str, Any]]:
             "path": str(w.path),
             "parent": parent,
             "axes": axes,
+            "stage": progress.stage if progress else "",
+            "progress_message": progress.message if progress else "",
+            "stale": progress.is_stale if progress else False,
         })
     # Sort: active first, then final, then archived/unreadable.
     order = {"active": 0, "final": 1, "archived": 2, "unreadable": 3}
@@ -112,6 +124,8 @@ def _render_experiments(snap: DashboardSnapshot) -> Panel:
     table = Table(box=None, expand=True, padding=(0, 1))
     table.add_column("name", style="bold")
     table.add_column("status")
+    table.add_column("stage", style="cyan")
+    table.add_column("progress")
     table.add_column("axes", style="cyan")
     table.add_column("parent")
     table.add_column("branch", style="dim")
@@ -122,9 +136,16 @@ def _render_experiments(snap: DashboardSnapshot) -> Panel:
             "archived": "dim",
             "unreadable": "red",
         }.get(e["status"], "")
+        stage_text = e.get("stage") or "-"
+        progress_msg = e.get("progress_message") or ""
+        if e.get("stale"):
+            progress_msg = f"{progress_msg} [stale]" if progress_msg else "[stale]"
+        progress_style = "yellow" if e.get("stale") else ""
         table.add_row(
             e["name"],
             Text(e["status"], style=status_style),
+            stage_text,
+            Text(progress_msg or "-", style=progress_style),
             ",".join(e["axes"]) or "-",
             e["parent"] or "-",
             e["branch"],
